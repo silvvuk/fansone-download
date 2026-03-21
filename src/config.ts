@@ -12,6 +12,8 @@ export type Config = {
     filter?: {
         mode?: 'blacklist' | 'whitelist';
         regex?: string;
+        dateMode?: 'before' | 'after';
+        date?: string;  // ISO 8601 date string
     };
 };
 

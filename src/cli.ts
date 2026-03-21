@@ -29,33 +29,75 @@ const parseRegexInput = (input: string): RegExp => {
 const createPostFilter = (config: Config | null) => {
     const mode = config?.filter?.mode;
     const regexInput = config?.filter?.regex?.trim();
-    if (!mode || !regexInput) {
-        return () => true;
-    }
-    let regex: RegExp;
-    try {
-        regex = parseRegexInput(regexInput);
-    } catch (error) {
-        console.warn(`帖子过滤正则无效，将忽略过滤（${(error as Error).message}）`);
-        return () => true;
-    }
-    return (post: Post) => {
-        const haystack = [
-            post.title,
-            post.title_zh,
-            post.title_en,
-            post.content,
-            post.content_zh,
-            post.content_en,
-            post.tags,
-            post.username,
-            post.displayname,
-        ].filter(Boolean).join(' ');
-        if (regex.global || regex.sticky) {
-            regex.lastIndex = 0;
+    const dateMode = config?.filter?.dateMode;
+    const dateInput = config?.filter?.date?.trim();
+
+    let regex: RegExp | null = null;
+    if (mode && regexInput) {
+        try {
+            regex = parseRegexInput(regexInput);
+        } catch (error) {
+            console.warn(`Post filter regex is invalid, will ignore regex filter (${(error as Error).message})`);
         }
-        const matched = regex.test(haystack);
-        return mode === 'blacklist' ? !matched : matched;
+    }
+
+    let filterDate: Date | null = null;
+    if (dateMode && dateInput) {
+        try {
+            filterDate = new Date(dateInput);
+            if (isNaN(filterDate.getTime())) {
+                throw new Error('Invalid date');
+            }
+        } catch (error) {
+            console.warn(`Post filter date is invalid, will ignore date filter (${(error as Error).message})`);
+            filterDate = null;
+        }
+    }
+
+    if (!regex && !filterDate) {
+        return () => true;
+    }
+
+    return (post: Post) => {
+        // Apply regex filter
+        if (regex) {
+            const haystack = [
+                post.title,
+                post.title_zh,
+                post.title_en,
+                post.content,
+                post.content_zh,
+                post.content_en,
+                post.tags,
+                post.username,
+                post.displayname,
+            ].filter(Boolean).join(' ');
+            if (regex.global || regex.sticky) {
+                regex.lastIndex = 0;
+            }
+            const matched = regex.test(haystack);
+            const regexPassed = mode === 'blacklist' ? !matched : matched;
+            if (!regexPassed) {
+                return false;
+            }
+        }
+
+        // Apply date filter
+        if (filterDate) {
+            const postDate = new Date(post.created_at);
+            if (isNaN(postDate.getTime())) {
+                return false;  // Skip posts with invalid dates
+            }
+
+            if (dateMode === 'before' && postDate > filterDate) {
+                return false;
+            }
+            if (dateMode === 'after' && postDate < filterDate) {
+                return false;
+            }
+        }
+
+        return true;
     };
 };
 
@@ -110,11 +152,11 @@ export async function runCli(): Promise<void> {
 
     while (true) {
         const menu = await select({
-            message: `用户: ${username ?? '-'} | 订阅数: ${subscriptions.count}`,
+            message: `User: ${username ?? '-'} | Subscriptions: ${subscriptions.count}`,
             choices: [
-                { name: '下载订阅资源', value: 'download' },
-                { name: '设置', value: 'settings' },
-                { name: '退出', value: 'exit' },
+                { name: 'Download subscription resources', value: 'download' },
+                { name: 'Settings', value: 'settings' },
+                { name: 'Exit', value: 'exit' },
             ],
         });
 
@@ -124,11 +166,11 @@ export async function runCli(): Promise<void> {
 
         if (menu === 'settings') {
             const settingsMenu = await select({
-                message: '设置',
+                message: 'Settings',
                 choices: [
-                    { name: '下载并发数', value: 'concurrency' },
-                    { name: '帖子过滤', value: 'filter' },
-                    { name: '返回', value: 'back' },
+                    { name: 'Download concurrency', value: 'concurrency' },
+                    { name: 'Post filter', value: 'filter' },
+                    { name: 'Back', value: 'back' },
                 ],
             });
 
@@ -139,12 +181,12 @@ export async function runCli(): Promise<void> {
             if (settingsMenu === 'concurrency') {
                 const currentConcurrency = config?.download?.concurrency ?? 6;
                 const newConcurrency = await input({
-                    message: `设置下载并发数（当前: ${currentConcurrency}）`,
+                    message: `Set download concurrency (current: ${currentConcurrency})`,
                     default: String(currentConcurrency),
                     validate: (value) => {
                         const num = Number(value);
                         if (!Number.isInteger(num) || num <= 0) {
-                            return '请输入大于 0 的整数';
+                            return 'Please enter an integer greater than 0';
                         }
                         return true;
                     },
@@ -155,79 +197,167 @@ export async function runCli(): Promise<void> {
                     },
                 });
                 config = await readConfig();
-                console.log(`并发数已更新为 ${config?.download?.concurrency ?? currentConcurrency}`);
+                console.log(`Concurrency updated to ${config?.download?.concurrency ?? currentConcurrency}`);
                 continue;
             }
 
+            // Filter configuration submenu
             const currentMode = config?.filter?.mode;
             const currentRegex = config?.filter?.regex ?? '';
+            const currentDateMode = config?.filter?.dateMode;
+            const currentDate = config?.filter?.date ?? '';
+
             const currentModeLabel = currentMode === 'blacklist'
-                ? '黑名单'
+                ? 'Blacklist'
                 : currentMode === 'whitelist'
-                    ? '白名单'
-                    : '关闭';
-            const filterMode = await select({
-                message: `帖子过滤（当前: ${currentModeLabel}${currentRegex ? ` | ${currentRegex}` : ''}）`,
+                    ? 'Whitelist'
+                    : 'Off';
+            const currentDateModeLabel = currentDateMode === 'before'
+                ? 'Before'
+                : currentDateMode === 'after'
+                    ? 'After'
+                    : 'Off';
+
+            const filterMenu = await select({
+                message: `Filter settings | Regex: ${currentModeLabel}${currentRegex ? ` (${currentRegex})` : ''} | Date: ${currentDateModeLabel}${currentDate ? ` (${currentDate})` : ''}`,
                 choices: [
-                    { name: '关闭过滤', value: 'disabled' },
-                    { name: '黑名单', value: 'blacklist' },
-                    { name: '白名单', value: 'whitelist' },
-                    { name: '返回', value: 'back' },
+                    { name: 'Configure regex filter', value: 'regex' },
+                    { name: 'Configure date filter', value: 'date' },
+                    { name: 'Disable all filters', value: 'disabled' },
+                    { name: 'Back', value: 'back' },
                 ],
             });
 
             const updatedConfig = (await readConfig()) || {};
 
-            if (filterMode === 'back') {
+            if (filterMenu === 'back') {
                 continue;
             }
 
-            if (filterMode === 'disabled') {
+            if (filterMenu === 'disabled') {
                 if (updatedConfig.filter) {
                     delete updatedConfig.filter;
                 }
                 await writeConfig(updatedConfig, true);
                 config = await readConfig();
-                console.log('帖子过滤已关闭');
+                console.log('All filters disabled');
                 continue;
             }
 
-            const newRegex = await input({
-                message: `设置正则（当前: ${currentRegex || '未设置'}）`,
-                default: currentRegex,
-                validate: (value) => {
-                    if (!value.trim()) {
-                        return '请输入正则或选择关闭过滤';
-                    }
-                    try {
-                        parseRegexInput(value);
-                        return true;
-                    } catch (error) {
-                        return `正则无效：${(error as Error).message}`;
-                    }
-                },
-            });
+            if (filterMenu === 'regex') {
+                const regexMode = await select({
+                    message: `Regex filter mode (current: ${currentModeLabel})`,
+                    choices: [
+                        { name: 'Disable regex filter', value: 'disabled' },
+                        { name: 'Blacklist', value: 'blacklist' },
+                        { name: 'Whitelist', value: 'whitelist' },
+                    ],
+                });
 
-            updatedConfig.filter = {
-                mode: filterMode as FilterMode,
-                regex: newRegex.trim(),
-            };
-            await writeConfig(updatedConfig, true);
-            config = await readConfig();
-            console.log(`帖子过滤已更新为 ${filterMode === 'blacklist' ? '黑名单' : '白名单'}：${newRegex.trim()}`);
-            continue;
+                if (regexMode === 'disabled') {
+                    if (updatedConfig.filter) {
+                        delete updatedConfig.filter.mode;
+                        delete updatedConfig.filter.regex;
+                        if (Object.keys(updatedConfig.filter).length === 0) {
+                            delete updatedConfig.filter;
+                        }
+                    }
+                    await writeConfig(updatedConfig, true);
+                    config = await readConfig();
+                    console.log('Regex filter disabled');
+                    continue;
+                }
+
+                const newRegex = await input({
+                    message: `Set regex (current: ${currentRegex || 'not set'})`,
+                    default: currentRegex,
+                    validate: (value) => {
+                        if (!value.trim()) {
+                            return 'Please enter a regex or choose to disable regex filter';
+                        }
+                        try {
+                            parseRegexInput(value);
+                            return true;
+                        } catch (error) {
+                            return `Invalid regex: ${(error as Error).message}`;
+                        }
+                    },
+                });
+
+                if (!updatedConfig.filter) {
+                    updatedConfig.filter = {};
+                }
+                updatedConfig.filter.mode = regexMode as FilterMode;
+                updatedConfig.filter.regex = newRegex.trim();
+
+                await writeConfig(updatedConfig, true);
+                config = await readConfig();
+                console.log(`Regex filter updated to ${regexMode}: ${newRegex.trim()}`);
+                continue;
+            }
+
+            if (filterMenu === 'date') {
+                const dateFilterMode = await select({
+                    message: `Date filter mode (current: ${currentDateModeLabel})`,
+                    choices: [
+                        { name: 'Disable date filter', value: 'disabled' },
+                        { name: 'Before date (posts created before specified date)', value: 'before' },
+                        { name: 'After date (posts created after specified date)', value: 'after' },
+                    ],
+                });
+
+                if (dateFilterMode === 'disabled') {
+                    if (updatedConfig.filter) {
+                        delete updatedConfig.filter.dateMode;
+                        delete updatedConfig.filter.date;
+                        if (Object.keys(updatedConfig.filter).length === 0) {
+                            delete updatedConfig.filter;
+                        }
+                    }
+                    await writeConfig(updatedConfig, true);
+                    config = await readConfig();
+                    console.log('Date filter disabled');
+                    continue;
+                }
+
+                const newDate = await input({
+                    message: `Set date (current: ${currentDate || 'not set'}) - Format: YYYY-MM-DD or ISO 8601`,
+                    default: currentDate,
+                    validate: (value) => {
+                        if (!value.trim()) {
+                            return 'Please enter a date or choose to disable date filter';
+                        }
+                        const testDate = new Date(value);
+                        if (isNaN(testDate.getTime())) {
+                            return 'Invalid date format';
+                        }
+                        return true;
+                    },
+                });
+
+                if (!updatedConfig.filter) {
+                    updatedConfig.filter = {};
+                }
+                updatedConfig.filter.dateMode = dateFilterMode as 'before' | 'after';
+                updatedConfig.filter.date = newDate.trim();
+
+                await writeConfig(updatedConfig, true);
+                config = await readConfig();
+                console.log(`Date filter updated to ${dateFilterMode}: ${newDate.trim()}`);
+                continue;
+            }
         }
 
         while (true) {
             const selected = await checkbox<string>({
-                message: '选择要下载的订阅（可多选）',
+                message: 'Select subscriptions to download (multiple selection allowed)',
                 choices: [
                     ...subscriptions.data.map(item => ({
                         name: item.username,
                         value: item.trade_no,
                         checked: true,
                     })),
-                    { name: '返回上级', value: '__back__' },
+                    { name: 'Back to previous', value: '__back__' },
                 ],
                 validate: (value) => {
                     const selectedValues = value as unknown as string[];
@@ -235,7 +365,7 @@ export async function runCli(): Promise<void> {
                         return true;
                     }
                     if (!selectedValues || selectedValues.length === 0) {
-                        return '至少选择一个订阅用户';
+                        return 'Select at least one subscription user';
                     }
                     return true;
                 },
@@ -247,25 +377,25 @@ export async function runCli(): Promise<void> {
 
             const selectedSubscriptions = subscriptions.data.filter(item => selected.includes(item.trade_no));
 
-            console.log(`已选择 ${selectedSubscriptions.length} 个订阅用户`);
+            console.log(`Selected ${selectedSubscriptions.length} subscription users`);
 
             let shouldReturnToMainMenu = false;
 
             while (true) {
-            const selectedContentTypes = await checkbox<string>({
-                    message: '选择要下载的内容类型（可多选）',
+                const selectedContentTypes = await checkbox<string>({
+                    message: 'Select content types to download (multiple selection allowed)',
                     choices: [
-                        { name: '图片', value: 'photo', checked: true },
-                        { name: '视频', value: 'video', checked: true },
-                        { name: '返回上级', value: '__back__' },
+                        { name: 'Photos', value: 'photo', checked: true },
+                        { name: 'Videos', value: 'video', checked: true },
+                        { name: 'Back to previous', value: '__back__' },
                     ],
-                validate: (value) => {
-                    const selectedValues = value as unknown as string[];
-                    if (selectedValues?.includes('__back__')) {
+                    validate: (value) => {
+                        const selectedValues = value as unknown as string[];
+                        if (selectedValues?.includes('__back__')) {
                             return true;
                         }
-                    if (!selectedValues || selectedValues.length === 0) {
-                            return '至少选择一个内容类型';
+                        if (!selectedValues || selectedValues.length === 0) {
+                            return 'Select at least one content type';
                         }
                         return true;
                     },
@@ -280,101 +410,101 @@ export async function runCli(): Promise<void> {
                 const postFilter = createPostFilter(config);
 
                 for (const [index, subscription] of selectedSubscriptions.entries()) {
-                    console.log(`[${index + 1}/${selectedSubscriptions.length}] 正在下载第 ${index + 1} 个订阅用户: ${subscription.username}`);
+                    console.log(`[${index + 1}/${selectedSubscriptions.length}] Downloading subscription user ${index + 1}: ${subscription.username}`);
 
                     if (shouldDownloadPhotos) {
-            // 获取图片 post 列表
-            let photoPosts: Post[] = [];
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 正在获取第一页图片帖子列表...`);
-            const firstPagePhotoPosts = await fansone.getPosts({
-                page: 1,
-                limit: 100,
-                type: 'picture',
-                username: subscription.username,
-            });
-            photoPosts.push(...firstPagePhotoPosts.data);
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 图片帖子总数: ${firstPagePhotoPosts.count}`);
+                        // Get photo post list
+                        let photoPosts: Post[] = [];
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Fetching first page of photo posts...`);
+                        const firstPagePhotoPosts = await fansone.getPosts({
+                            page: 1,
+                            limit: 100,
+                            type: 'picture',
+                            username: subscription.username,
+                        });
+                        photoPosts.push(...firstPagePhotoPosts.data);
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Total photo posts: ${firstPagePhotoPosts.count}`);
 
-            for (let page = 2; page <= Math.ceil(firstPagePhotoPosts.count / 100); page++) {
-                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 正在获取第 ${page} 页图片帖子列表...`);
-                const currentPagePhotoPosts = await fansone.getPosts({
-                    page,
-                    limit: 100,
-                    type: 'picture',
-                    username: subscription.username,
-                });
-                photoPosts.push(...currentPagePhotoPosts.data);
-            }
+                        for (let page = 2; page <= Math.ceil(firstPagePhotoPosts.count / 100); page++) {
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Fetching page ${page} of photo posts...`);
+                            const currentPagePhotoPosts = await fansone.getPosts({
+                                page,
+                                limit: 100,
+                                type: 'picture',
+                                username: subscription.username,
+                            });
+                            photoPosts.push(...currentPagePhotoPosts.data);
+                        }
 
-            // 仅保留可以查看的图片
-            const canViewPhotoPosts = photoPosts.filter(post => post.can_view != 0);
-            const filteredPhotoPosts = canViewPhotoPosts.filter(postFilter);
+                        // Keep only viewable photos
+                        const canViewPhotoPosts = photoPosts.filter(post => post.can_view != 0);
+                        const filteredPhotoPosts = canViewPhotoPosts.filter(postFilter);
 
-            const pendingPhotoPosts = filteredPhotoPosts.filter(post => !downloadedPostIds.has(post.id));
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 开始下载图片帖子 剩余/过滤后/可看/总计 ${pendingPhotoPosts.length}/${filteredPhotoPosts.length}/${canViewPhotoPosts.length}/${photoPosts.length}）...`);
+                        const pendingPhotoPosts = filteredPhotoPosts.filter(post => !downloadedPostIds.has(post.id));
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Starting photo download - pending/filtered/viewable/total: ${pendingPhotoPosts.length}/${filteredPhotoPosts.length}/${canViewPhotoPosts.length}/${photoPosts.length}`);
 
-            for (const [photoIndex, photoPost] of pendingPhotoPosts.entries()) {
-                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) 正在下载图片帖子: ${photoPost.title}`);
-                try {
-                    const photo = new Photo({
-                        post: photoPost,
-                    });
-                    await photo.downloadToLocal();
-                    downloadedPostIds.add(photoPost.id);
-                } catch (error) {
-                    console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) 下载图片帖子失败: ${photoPost.title}`, error);
-                }
-            }
+                        for (const [photoIndex, photoPost] of pendingPhotoPosts.entries()) {
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Downloading photo post: ${photoPost.title}`);
+                            try {
+                                const photo = new Photo({
+                                    post: photoPost,
+                                });
+                                await photo.downloadToLocal();
+                                downloadedPostIds.add(photoPost.id);
+                            } catch (error) {
+                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Failed to download photo post: ${photoPost.title}`, error);
+                            }
+                        }
                     }
 
                     if (shouldDownloadVideos) {
-            // 获取视频 post 列表
-            let videoPosts: Post[] = [];
+                        // Get video post list
+                        let videoPosts: Post[] = [];
 
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 正在获取第一页视频帖子列表...`);
-            const firstPageVideoPosts = await fansone.getPosts({
-                page: 1,
-                limit: 100,
-                type: 'video',
-                username: subscription.username,
-            });
-            videoPosts.push(...firstPageVideoPosts.data);
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Fetching first page of video posts...`);
+                        const firstPageVideoPosts = await fansone.getPosts({
+                            page: 1,
+                            limit: 100,
+                            type: 'video',
+                            username: subscription.username,
+                        });
+                        videoPosts.push(...firstPageVideoPosts.data);
 
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 视频帖子总数: ${firstPageVideoPosts.count}`);
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Total video posts: ${firstPageVideoPosts.count}`);
 
-            for (let page = 2; page <= Math.ceil(firstPageVideoPosts.count / 100); page++) {
-                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 正在获取第 ${page} 页视频帖子列表...`);
-                const currentPageVideoPosts = await fansone.getPosts({
-                    page,
-                    limit: 100,
-                    type: 'video',
-                    username: subscription.username,
-                });
-                videoPosts.push(...currentPageVideoPosts.data);
-            }
+                        for (let page = 2; page <= Math.ceil(firstPageVideoPosts.count / 100); page++) {
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Fetching page ${page} of video posts...`);
+                            const currentPageVideoPosts = await fansone.getPosts({
+                                page,
+                                limit: 100,
+                                type: 'video',
+                                username: subscription.username,
+                            });
+                            videoPosts.push(...currentPageVideoPosts.data);
+                        }
 
-            // 仅保留可以查看的视频
-            const canViewVideoPosts = videoPosts.filter(post => post.can_view != 0);
-            const filteredVideoPosts = canViewVideoPosts.filter(postFilter);
+                        // Keep only viewable videos
+                        const canViewVideoPosts = videoPosts.filter(post => post.can_view != 0);
+                        const filteredVideoPosts = canViewVideoPosts.filter(postFilter);
 
-            const pendingPosts = filteredVideoPosts.filter(post => !downloadedPostIds.has(post.id));
-            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} 开始下载视频帖子 剩余/过滤后/可看/总计 ${pendingPosts.length}/${filteredVideoPosts.length}/${canViewVideoPosts.length}/${videoPosts.length}）...`);
+                        const pendingPosts = filteredVideoPosts.filter(post => !downloadedPostIds.has(post.id));
+                        console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Starting video download - pending/filtered/viewable/total: ${pendingPosts.length}/${filteredVideoPosts.length}/${canViewVideoPosts.length}/${videoPosts.length}`);
 
-            for (const [videoIndex, videoPost] of pendingPosts.entries()) {
-                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) 正在下载视频帖子: ${videoPost.title}`);
+                        for (const [videoIndex, videoPost] of pendingPosts.entries()) {
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Downloading video post: ${videoPost.title}`);
 
-                try {
-                    const video = new Video({
-                        post: videoPost,
-                        fansone,
-                    });
-                    await video.downloadToLocal();
-                    downloadedPostIds.add(videoPost.id);
-                } catch (error) {
-                    console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) 下载视频帖子失败: ${videoPost.title}`, error);
-                }
+                            try {
+                                const video = new Video({
+                                    post: videoPost,
+                                    fansone,
+                                });
+                                await video.downloadToLocal();
+                                downloadedPostIds.add(videoPost.id);
+                            } catch (error) {
+                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Failed to download video post: ${videoPost.title}`, error);
+                            }
 
-            }
+                        }
                     }
                 }
 

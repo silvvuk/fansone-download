@@ -66,7 +66,7 @@ export class Video {
         const tsRangeTempDir = path.resolve(TEMP_DIR, `ts-range-${this.post.id}`);
 
         await dirExistsOrMkdir(tsRangeTempDir);
-        logger.info(`[Video:${this.post.id}] 开始下载 m3u8: ${m3u8Url}`);
+        logger.info(`[Video:${this.post.id}] Start downloading m3u8: ${m3u8Url}`);
         const requestHeaders = {
             referer: 'https://fansone.co/',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0'
@@ -88,7 +88,7 @@ export class Video {
                         throw error;
                     }
                     const wait = 500 * (2 ** (attempt - 1));
-                    logger.warn(`[Video:${this.post.id}] 请求失败，${wait}ms 后重试(${attempt}/${maxRetries})`);
+                    logger.warn(`[Video:${this.post.id}] Request failed, retrying after ${wait}ms (${attempt}/${maxRetries})`);
                     await sleep(wait);
                 }
             }
@@ -128,12 +128,12 @@ export class Video {
         let { segments, nestedPlaylistUrl } = parseM3u8(m3u8Text, m3u8Url);
 
         if (segments.length === 0 && nestedPlaylistUrl) {
-            logger.debug(`[Video:${this.post.id}] 使用子清单: ${nestedPlaylistUrl}`);
+            logger.debug(`[Video:${this.post.id}] Using sub-playlist: ${nestedPlaylistUrl}`);
             m3u8Text = await fetchTextWithRetry(nestedPlaylistUrl);
             segments = parseM3u8(m3u8Text, nestedPlaylistUrl).segments;
         }
 
-        logger.info(`[Video:${this.post.id}] 分片数量: ${segments.length}`);
+        logger.info(`[Video:${this.post.id}] Number of segments: ${segments.length}`);
 
         const data = await readData();
         const videoKey = String(this.post.id);
@@ -182,9 +182,9 @@ export class Video {
         const totalSegments = segments.length;
         const initialSkipped = existingSet.size;
 
-        // 如果临时文件目录存在，且分片数量与 segments.length 一致，则跳过下载 ts，直接封装
+        // If temporary file directory exists and segment count matches segments.length, skip ts download and go directly to muxing
         if (initialSkipped === totalSegments && totalSegments > 0) {
-            logger.info(`[Video:${this.post.id}] 临时分片齐全，跳过下载 ts`);
+            logger.info(`[Video:${this.post.id}] All temporary segments present, skipping ts download`);
         } else {
             const concurrency = (await readConfig()).download?.concurrency ?? 6;
             const queue = new PQueue({ concurrency });
@@ -194,7 +194,7 @@ export class Video {
             const startedAt = Date.now();
 
             const progressBar = new cliProgress.SingleBar({
-                format: `[Video:${this.post.id}] {bar} {percentage}% | {value}/{total} | {speed} | 跳过:{skipped}`,
+                format: `[Video:${this.post.id}] {bar} {percentage}% | {value}/{total} | {speed} | Skipped:{skipped}`,
                 hideCursor: true,
                 clearOnComplete: true,
             }, cliProgress.Presets.shades_classic);
@@ -231,7 +231,7 @@ export class Video {
                             throw error;
                         }
                         const wait = 500 * (2 ** (attempt - 1));
-                        logger.warn(`[Video:${this.post.id}] 分片下载失败，${wait}ms 后重试(${attempt}/${maxRetries})`);
+                        logger.warn(`[Video:${this.post.id}] Segment download failed, retrying after ${wait}ms (${attempt}/${maxRetries})`);
                         await sleep(wait);
                     }
                 }
@@ -261,7 +261,7 @@ export class Video {
 
             await Promise.all(tasks);
             progressBar.stop();
-            logger.info(`[Video:${this.post.id}] 下载完成，跳过: ${skipped}，成功: ${completed}`);
+            logger.info(`[Video:${this.post.id}] Download completed, skipped: ${skipped}, success: ${completed}`);
         }
         const outputPath = await this.remuxWithNodeAv(tsRangeTempDir, outputDir, fileName);
 
@@ -278,7 +278,7 @@ export class Video {
         await writeData(data);
 
         await fs.rm(tsRangeTempDir, { recursive: true });
-        logger.debug(`[Video:${this.post.id}] 删除临时目录: ${tsRangeTempDir}`);
+        logger.debug(`[Video:${this.post.id}] Deleted temporary directory: ${tsRangeTempDir}`);
     }
 
     private async remuxWithNodeAv(tsDir: string, outputDir: string, fileName: string): Promise<string | null> {
@@ -287,7 +287,7 @@ export class Video {
             .sort();
 
         if (tsFiles.length === 0) {
-            logger.warn(`[Video:${this.post.id}] 未找到 ts 分片，跳过封装`);
+            logger.warn(`[Video:${this.post.id}] No ts segments found, skipping muxing`);
             return null;
         }
         const probePath = path.resolve(tsDir, tsFiles[0]);
@@ -328,8 +328,8 @@ export class Video {
             await dirExistsOrMkdir(outputDir);
             const outputPath = path.resolve(outputDir, `${fileName}.${outputExt}`);
 
-            logger.info(`[Video:${this.post.id}] 推断格式: video=${videoCodecName}(${videoCodecId ?? 'none'}), audio=${audioCodecName}(${audioCodecId ?? 'none'})`);
-            logger.info(`[Video:${this.post.id}] 封装输出: ${outputPath}`);
+            logger.info(`[Video:${this.post.id}] Inferred format: video=${videoCodecName}(${videoCodecId ?? 'none'}), audio=${audioCodecName}(${audioCodecId ?? 'none'})`);
+            logger.info(`[Video:${this.post.id}] Muxing output: ${outputPath}`);
 
             const muxer = await Muxer.open(outputPath, {
                 input: probe,
@@ -395,7 +395,7 @@ export class Video {
             await probe.close();
         }
 
-        logger.info(`[Video:${this.post.id}] 封装完成`);
+        logger.info(`[Video:${this.post.id}] Muxing completed`);
         return outputPath;
     }
 

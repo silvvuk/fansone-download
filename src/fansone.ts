@@ -75,11 +75,11 @@ export class FansoneApi {
                     throw error;
                 }
                 const wait = 500 * (2 ** (attempt - 1));
-                console.warn(`${label} 失败，${wait}ms 后重试(${attempt}/${maxRetries})`);
+                console.warn(`${label} failed, retrying after ${wait}ms (${attempt}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, wait));
             }
         }
-        throw new Error(`${label} 失败`);
+        throw new Error(`${label} failed`);
     }
 
     public async getSubscriptions({
@@ -100,10 +100,10 @@ export class FansoneApi {
                     type,
                 },
             }),
-            '获取订阅失败',
+            'Failed to get subscriptions',
         );
         if (response.status !== 200 || !response.data.success) {
-            throw new Error('获取订阅失败');
+            throw new Error('Failed to get subscriptions');
         }
         return response.data;
     }
@@ -130,10 +130,10 @@ export class FansoneApi {
                     isEnablePager: false,
                 },
             }),
-            '获取帖子失败',
+            'Failed to get posts',
         );
         if (response.status !== 200 || !response.data.success) {
-            throw new Error('获取帖子失败');
+            throw new Error('Failed to get posts');
         }
         return response.data;
     }
@@ -154,10 +154,10 @@ export class FansoneApi {
                     domain,
                 },
             }),
-            '获取视频签名 URL 失败',
+            'Failed to get video signed URL',
         );
         if (response.status !== 200 || !response.data.success) {
-            throw new Error('获取视频签名 URL 失败');
+            throw new Error('Failed to get video signed URL');
         }
         return response.data.url;
     }

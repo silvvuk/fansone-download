@@ -52,7 +52,7 @@ export class Photo {
         };
 
         const progressBar = new cliProgress.SingleBar({
-            format: `[Photo:${this.post.id}] {bar} {percentage}% | {value}/{total} | {speed} | 跳过:{skipped}`,
+            format: `[Photo:${this.post.id}] {bar} {percentage}% | {value}/{total} | {speed} | Skipped:{skipped}`,
             hideCursor: true,
             clearOnComplete: true,
         }, cliProgress.Presets.shades_classic);
@@ -84,7 +84,7 @@ export class Photo {
                         throw error;
                     }
                     const wait = 500 * (2 ** (attempt - 1));
-                    logger.warn(`[Photo:${this.post.id}] 下载失败，${wait}ms 后重试(${attempt}/${maxRetries})`);
+                    logger.warn(`[Photo:${this.post.id}] Download failed, retrying after ${wait}ms (${attempt}/${maxRetries})`);
                     await sleep(wait);
                 }
             }
@@ -108,6 +108,6 @@ export class Photo {
 
         await Promise.all(tasks);
         progressBar.stop();
-        logger.info(`[Photo:${this.post.id}] 下载完成，跳过: ${skipped}，成功: ${completed}`);
+        logger.info(`[Photo:${this.post.id}] Download completed, skipped: ${skipped}, success: ${completed}`);
     }
 }
