@@ -1,12 +1,14 @@
 # fansone-download
 
-> 基于 playwright 登录获取 cookies, axios 请求 api, got 下载分片, node-av (ffmpeg) 推测并合并文件的 fansone 订阅下载器。
+> A fansone subscription downloader based on playwright for login and cookie retrieval, axios for API requests,
+got for chunk downloading, and node-av (ffmpeg) for file format detection and merging.
 
-## 怎么用？
+## How to use?
 
-首先 node >= 22, 因为要安装 node-av 这个包 (它是 ffmpeg 的 node binding, 有 pre-built bin)。
+First, you need node >= 22, because you need to install the node-av package (it's a node binding for
+ffmpeg with pre-built binaries).
 
-然后
+Then
 
 ```sh
 corepack enable pnpm
@@ -14,14 +16,18 @@ pnpm i
 pnpm start
 ```
 
-即可~
+That's it~
 
-配置默认保存在 `config.yaml`, 断点续传等数据保存在 `data.json`, 登录时使用 playwright 有头浏览器, 所以可能当前版本还需要 GUI 系统, 当然你也可以在有 GUI 的系统中登录后把 cookies 拷过来。
+Configuration is saved in `config.yaml` by default, and data like resumable download information
+is saved in `data.json`. Playwright uses a headed browser for login, so the current version may
+require a GUI system. Of course, you can also copy the cookies from a GUI system after logging in.
 
-下载后的文件放置在 `downloads` 下, 按照 `userDisplayName(@username)` + `videos`/`photos` + `title-date(YYYYMMDD_HHmmss)-#FDpostId(-index).ext` 组织文件。
+Downloaded files are placed in the `downloads` directory, organized as
+`userDisplayName(@username)` + `videos`/`photos` + `title-date(YYYYMMDD_HHmmss)-#FDpostId(-index).ext`.
 
 ## Q&A
 
-1. 因为 node-av 崩溃？
+1. Crashing because of node-av?
 
-> 可以到 node-av 仓库中 release 手动下载 pre-built 的 binary, 放置于 `node_modules/node-av/binary/node-av.node`
+> You can manually download the pre-built binary from the node-av repository releases and place
+it at `node_modules/node-av/binary/node-av.node`
