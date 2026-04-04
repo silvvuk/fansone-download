@@ -1,10 +1,12 @@
-import { initConfig } from "./config.js";
+import { initConfig, readConfig } from "./config.js";
 import { initData } from "./data.js";
 import { dirExistsOrMkdir } from "./utils.js";
-import path from 'node:path';
+import { getTempDir, setConfig } from "./consts.js";
 
 export const bootstrap = async () => {
-    await dirExistsOrMkdir(path.resolve(process.cwd(), 'downloads', 'temp'));
     await initConfig();
+    const config = await readConfig();
+    setConfig(config);
+    await dirExistsOrMkdir(getTempDir());
     await initData();
 }

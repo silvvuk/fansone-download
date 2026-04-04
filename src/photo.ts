@@ -26,9 +26,18 @@ export class Photo {
         const { images } = this.post;
         const imageUrls = images.split(',').map(url => url.trim()).filter(Boolean);
 
-        const outputDir = path.resolve(DOWNLOADS_DIR, userDirName(this.post), 'photos');
+        const outputDir = path.resolve(DOWNLOADS_DIR(), userDirName(this.post), 'photos');
         await dirExistsOrMkdir(outputDir);
-        const fileName = `${this.post.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'photo'}-${dayjs(this.post.created_at).format('YYYYMMDD_HHmmss')}-#FD${this.post.id}`;
+        const fileName = `${dayjs(this.post.created_at).format('YYYYMMDD-HHmmss')}_${this.post.id}_${this.post.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'photo'}`;
+
+        // Early out if output file already exists
+        const existingOutputs = await fs.readdir(outputDir).catch(() => []);
+        const outputExists = existingOutputs.some(file => file.startsWith(fileName));
+
+        if (outputExists) {
+            logger.info(`[Video] Output file already exists, skipping download`);
+            return;
+        }
 
         const concurrency = (await readConfig()).download?.concurrency ?? 6;
         const queue = new PQueue({ concurrency });

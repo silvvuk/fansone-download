@@ -1,6 +1,6 @@
 import type { Post } from "./fansone.d.js";
 import { FansoneApi } from "./fansone.js";
-import { DOWNLOADS_DIR, TEMP_DIR } from "./consts.js";
+import { DOWNLOADS_DIR, getTempDir } from "./consts.js";
 import { dirExistsOrMkdir, getSpeedText, userDirName } from "./utils.js";
 import path from 'node:path';
 import { createWriteStream, promises as fs } from 'node:fs';
@@ -58,15 +58,24 @@ export class Video {
 
     public async downloadToLocal() {
 
-        const outputDir = path.resolve(DOWNLOADS_DIR, userDirName(this.post), 'videos');
+        const outputDir = path.resolve(DOWNLOADS_DIR(), userDirName(this.post), 'videos');
         await dirExistsOrMkdir(outputDir);
-        const fileName = `${this.post.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'video'}-${dayjs(this.post.created_at).format('YYYYMMDD_HHmmss')}-#FD${this.post.id}`;
+        const fileName = `${dayjs(this.post.created_at).format('YYYYMMDD-HHmmss')}_${this.post.id}_${this.post.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'video'}`;
+
+        // Early out if output file already exists
+        const existingOutputs = await fs.readdir(outputDir).catch(() => []);
+        const outputExists = existingOutputs.some(file => file.startsWith(fileName));
+
+        if (outputExists) {
+            logger.info(`[Video] Output file already exists, skipping download`);
+            return;
+        }
 
         const m3u8Url = await this.getM3u8Url();
-        const tsRangeTempDir = path.resolve(TEMP_DIR, `ts-range-${this.post.id}`);
+        const tsRangeTempDir = path.resolve(getTempDir(), `ts-range-${this.post.id}`);
 
         await dirExistsOrMkdir(tsRangeTempDir);
-        logger.info(`[Video:${this.post.id}] Start downloading m3u8: ${m3u8Url}`);
+        logger.info(`[Video] Start downloading m3u8: ${m3u8Url}`);
         const requestHeaders = {
             referer: 'https://fansone.co/',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0'

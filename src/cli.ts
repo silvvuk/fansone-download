@@ -2,15 +2,57 @@ import { checkbox, input, select } from '@inquirer/prompts';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { readConfig, writeConfig, type Config } from './config.js';
-import { DOWNLOADS_DIR } from './consts.js';
+import { DOWNLOADS_DIR, setConfig } from './consts.js';
 import { FansoneApi } from './fansone.js';
 import { Video } from './video.js';
 import type { Post } from './fansone.d.js';
 import { Photo } from './photo.js';
+import dayjs from 'dayjs';
 
 const POST_ID_REGEX = /#FD(\d+)/;
 
 type FilterMode = 'blacklist' | 'whitelist';
+
+type DateBoundary = {
+    mode: 'before' | 'after';
+    date: Date;
+};
+
+const createDateBoundary = (config: Config | null): DateBoundary | null => {
+    const dateMode = config?.filter?.dateMode;
+    const dateInput = config?.filter?.date?.trim();
+
+    if (!dateMode || !dateInput) {
+        return null;
+    }
+
+    try {
+        const parsedDate = new Date(dateInput);
+        if (isNaN(parsedDate.getTime())) {
+            throw new Error('Invalid date');
+        }
+        return {
+            mode: dateMode,
+            date: parsedDate,
+        };
+    } catch (error) {
+        console.warn(`Post filter date is invalid, will ignore date boundary (${(error as Error).message})`);
+        return null;
+    }
+};
+
+const shouldTerminateOnDateBoundary = (post: Post, boundary: DateBoundary): boolean => {
+    const postDate = new Date(post.created_at);
+    if (isNaN(postDate.getTime())) {
+        return false;
+    }
+
+    if (boundary.mode === 'before') {
+        return postDate > boundary.date;
+    }
+
+    return postDate < boundary.date;
+};
 
 const parseRegexInput = (input: string): RegExp => {
     const trimmed = input.trim();
@@ -148,7 +190,7 @@ export async function runCli(): Promise<void> {
     });
 
     const { username } = fansone.getUserInfo();
-    const downloadedPostIds = await collectDownloadedPostIds(DOWNLOADS_DIR);
+    const downloadedPostIds = await collectDownloadedPostIds(DOWNLOADS_DIR());
 
     while (true) {
         const menu = await select({
@@ -169,6 +211,7 @@ export async function runCli(): Promise<void> {
                 message: 'Settings',
                 choices: [
                     { name: 'Download concurrency', value: 'concurrency' },
+                    { name: 'Download location', value: 'location' },
                     { name: 'Post filter', value: 'filter' },
                     { name: 'Back', value: 'back' },
                 ],
@@ -197,7 +240,32 @@ export async function runCli(): Promise<void> {
                     },
                 });
                 config = await readConfig();
+                setConfig(config);
                 console.log(`Concurrency updated to ${config?.download?.concurrency ?? currentConcurrency}`);
+                continue;
+            }
+
+            if (settingsMenu === 'location') {
+                const currentLocation = config?.download?.location ?? path.resolve(process.cwd(), 'downloads');
+                const newLocation = await input({
+                    message: `Set download location (current: ${currentLocation})`,
+                    default: currentLocation,
+                    validate: (value) => {
+                        const trimmed = value.trim();
+                        if (!trimmed) {
+                            return 'Please enter a valid path';
+                        }
+                        return true;
+                    },
+                });
+                await writeConfig({
+                    download: {
+                        location: newLocation.trim(),
+                    },
+                });
+                config = await readConfig();
+                setConfig(config);
+                console.log(`Download location updated to ${config?.download?.location ?? currentLocation}`);
                 continue;
             }
 
@@ -355,7 +423,6 @@ export async function runCli(): Promise<void> {
                     ...subscriptions.data.map(item => ({
                         name: item.username,
                         value: item.trade_no,
-                        checked: true,
                     })),
                     { name: 'Back to previous', value: '__back__' },
                 ],
@@ -385,8 +452,8 @@ export async function runCli(): Promise<void> {
                 const selectedContentTypes = await checkbox<string>({
                     message: 'Select content types to download (multiple selection allowed)',
                     choices: [
-                        { name: 'Photos', value: 'photo', checked: true },
-                        { name: 'Videos', value: 'video', checked: true },
+                        { name: 'Photos', value: 'photo' },
+                        { name: 'Videos', value: 'video' },
                         { name: 'Back to previous', value: '__back__' },
                     ],
                     validate: (value) => {
@@ -408,6 +475,8 @@ export async function runCli(): Promise<void> {
                 const shouldDownloadPhotos = selectedContentTypes.includes('photo');
                 const shouldDownloadVideos = selectedContentTypes.includes('video');
                 const postFilter = createPostFilter(config);
+                const dateBoundary = createDateBoundary(config);
+                let terminatedByDateBoundary = false;
 
                 for (const [index, subscription] of selectedSubscriptions.entries()) {
                     console.log(`[${index + 1}/${selectedSubscriptions.length}] Downloading subscription user ${index + 1}: ${subscription.username}`);
@@ -444,7 +513,15 @@ export async function runCli(): Promise<void> {
                         console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Starting photo download - pending/filtered/viewable/total: ${pendingPhotoPosts.length}/${filteredPhotoPosts.length}/${canViewPhotoPosts.length}/${photoPosts.length}`);
 
                         for (const [photoIndex, photoPost] of pendingPhotoPosts.entries()) {
-                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Downloading photo post: ${photoPost.title}`);
+                            if (dateBoundary && shouldTerminateOnDateBoundary(photoPost, dateBoundary)) {
+                                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Reached date boundary at post #FD${photoPost.id}, terminating current download task`);
+                                terminatedByDateBoundary = true;
+                                break;
+                            }
+
+                            const fileName = `${dayjs(photoPost.created_at).format('YYYYMMDD-HHmmss')}_${photoPost.id}_${photoPost.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'photo'}`;
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Downloading photo post: ${fileName}`);
+
                             try {
                                 const photo = new Photo({
                                     post: photoPost,
@@ -452,8 +529,12 @@ export async function runCli(): Promise<void> {
                                 await photo.downloadToLocal();
                                 downloadedPostIds.add(photoPost.id);
                             } catch (error) {
-                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Failed to download photo post: ${photoPost.title}`, error);
+                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${photoIndex + 1}/${pendingPhotoPosts.length}) Failed to download photo post: ${fileName}`, error);
                             }
+                        }
+
+                        if (terminatedByDateBoundary) {
+                            break;
                         }
                     }
 
@@ -491,7 +572,14 @@ export async function runCli(): Promise<void> {
                         console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Starting video download - pending/filtered/viewable/total: ${pendingPosts.length}/${filteredVideoPosts.length}/${canViewVideoPosts.length}/${videoPosts.length}`);
 
                         for (const [videoIndex, videoPost] of pendingPosts.entries()) {
-                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Downloading video post: ${videoPost.title}`);
+                            if (dateBoundary && shouldTerminateOnDateBoundary(videoPost, dateBoundary)) {
+                                console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} Reached date boundary at post #FD${videoPost.id}, terminating current download task`);
+                                terminatedByDateBoundary = true;
+                                break;
+                            }
+
+                            const fileName = `${dayjs(videoPost.created_at).format('YYYYMMDD-HHmmss')}_${videoPost.id}_${videoPost.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'video'}`;
+                            console.log(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Downloading video post: ${fileName}`);
 
                             try {
                                 const video = new Video({
@@ -501,11 +589,23 @@ export async function runCli(): Promise<void> {
                                 await video.downloadToLocal();
                                 downloadedPostIds.add(videoPost.id);
                             } catch (error) {
-                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Failed to download video post: ${videoPost.title}`, error);
+                                console.error(`[${index + 1}/${selectedSubscriptions.length}] ${subscription.username} (${videoIndex + 1}/${pendingPosts.length}) Failed to download video post: ${fileName}`, error);
                             }
 
                         }
+
+                        if (terminatedByDateBoundary) {
+                            break;
+                        }
                     }
+
+                    if (terminatedByDateBoundary) {
+                        break;
+                    }
+                }
+
+                if (terminatedByDateBoundary) {
+                    console.log('Date boundary reached, returning to main menu');
                 }
 
                 shouldReturnToMainMenu = true;

@@ -8,6 +8,7 @@ export type Config = {
     };
     download?: {
         concurrency?: number;
+        location?: string;  // Custom download directory path
     };
     filter?: {
         mode?: 'blacklist' | 'whitelist';
