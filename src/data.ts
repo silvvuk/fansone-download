@@ -40,6 +40,13 @@ export async function readData(): Promise<DownloadData> {
         if (!data || typeof data !== 'object' || !data.videos || typeof data.videos !== 'object') {
             return { ...defaultData };
         }
+        // Drop completed entries to keep data.json compact; completion is determined
+        // by the presence of the output file on disk, not by this file.
+        for (const [key, progress] of Object.entries(data.videos)) {
+            if (progress?.status === 'completed') {
+                delete data.videos[key];
+            }
+        }
         return data;
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

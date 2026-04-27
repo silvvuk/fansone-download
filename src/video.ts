@@ -55,7 +55,6 @@ export class Video {
 
     }
 
-
     public async downloadToLocal() {
 
         const outputDir = path.resolve(DOWNLOADS_DIR(), userDirName(this.post), 'videos');
@@ -272,18 +271,13 @@ export class Video {
             progressBar.stop();
             logger.info(`[Video:${this.post.id}] Download completed, skipped: ${skipped}, success: ${completed}`);
         }
-        const outputPath = await this.remuxWithNodeAv(tsRangeTempDir, outputDir, fileName);
+        await this.remuxWithNodeAv(tsRangeTempDir, outputDir, fileName);
 
-        data.videos[videoKey] = {
-            totalSegments: segments.length,
-            completedSegments: Array.from(completedSet).sort((a, b) => a - b),
-            status: 'completed',
-            createdAt: existingProgress?.createdAt ?? now,
-            updatedAt: new Date().toISOString(),
-            outputPath: outputPath ?? undefined,
-            title: this.post.title,
-            username: this.post.username,
-        };
+        // Remove the completed entry to keep data.json small.
+        // Completed downloads are detected by the existence of the output file on disk
+        // (see the early-out check at the top of this method), so persisting completed
+        // entries here serves no functional purpose.
+        delete data.videos[videoKey];
         await writeData(data);
 
         await fs.rm(tsRangeTempDir, { recursive: true });
