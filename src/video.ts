@@ -42,14 +42,17 @@ export class Video {
     private async getM3u8Url() {
 
         switch (this.post.domain) {
-            case 'video7.fansone.co':
-                return `https://${this.post.domain}/${this.post.domain}/${this.post.video}/master.m3u8`;
             case 'video9194.fansone.co':
-            default:
                 return await this.fansone.getVideoSignedUrl({
                     videoId: this.post.video,
                     domain: this.post.domain,
                 });
+            default:
+                // video5, video7, and other Bunny CDN domains serve the master playlist directly
+                // at https://{domain}/{videoId}/master.m3u8. The /bunny/signed-url endpoint only
+                // accepts the video9194 domain. Note: the domain must NOT be duplicated in the
+                // path — that returns 403 Forbidden.
+                return `https://${this.post.domain}/${this.post.video}/master.m3u8`;
         }
 
 
