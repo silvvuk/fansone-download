@@ -9,6 +9,7 @@ export type Config = {
     download?: {
         concurrency?: number;
         location?: string;  // Custom download directory path
+        contentTypes?: 'photo' | 'video' | 'all';
     };
     filter?: {
         mode?: 'blacklist' | 'whitelist';

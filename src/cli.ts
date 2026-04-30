@@ -212,6 +212,7 @@ export async function runCli(): Promise<void> {
                 choices: [
                     { name: 'Download concurrency', value: 'concurrency' },
                     { name: 'Download location', value: 'location' },
+                    { name: 'Default content types', value: 'contentTypes' },
                     { name: 'Post filter', value: 'filter' },
                     { name: 'Back', value: 'back' },
                 ],
@@ -242,6 +243,31 @@ export async function runCli(): Promise<void> {
                 config = await readConfig();
                 setConfig(config);
                 console.log(`Concurrency updated to ${config?.download?.concurrency ?? currentConcurrency}`);
+                continue;
+            }
+
+            if (settingsMenu === 'contentTypes') {
+                const currentContentTypes = config?.download?.contentTypes;
+                const currentContentTypesLabel = currentContentTypes ?? 'prompt';
+                const newContentTypes = await select({
+                    message: `Set default content types (current: ${currentContentTypesLabel})`,
+                    choices: [
+                        { name: 'Prompt every time', value: 'prompt' },
+                        { name: 'Photos only', value: 'photo' },
+                        { name: 'Videos only', value: 'video' },
+                        { name: 'All (photos and videos)', value: 'all' },
+                    ],
+                });
+                const updatedDownload = { ...(config?.download ?? {}) };
+                if (newContentTypes === 'prompt') {
+                    delete updatedDownload.contentTypes;
+                } else {
+                    updatedDownload.contentTypes = newContentTypes as 'photo' | 'video' | 'all';
+                }
+                await writeConfig({ download: updatedDownload }, false);
+                config = await readConfig();
+                setConfig(config);
+                console.log(`Default content types updated to: ${newContentTypes}`);
                 continue;
             }
 
@@ -448,32 +474,40 @@ export async function runCli(): Promise<void> {
 
             let shouldReturnToMainMenu = false;
 
+            const configuredContentTypes = config?.download?.contentTypes;
+
             while (true) {
-                const selectedContentTypes = await checkbox<string>({
-                    message: 'Select content types to download (multiple selection allowed)',
-                    choices: [
-                        { name: 'Photos', value: 'photo' },
-                        { name: 'Videos', value: 'video' },
-                        { name: 'Back to previous', value: '__back__' },
-                    ],
-                    validate: (value) => {
-                        const selectedValues = value as unknown as string[];
-                        if (selectedValues?.includes('__back__')) {
+                let selectedContentTypes: string[];
+
+                if (configuredContentTypes) {
+                    selectedContentTypes = [configuredContentTypes];
+                } else {
+                    selectedContentTypes = await checkbox<string>({
+                        message: 'Select content types to download (multiple selection allowed)',
+                        choices: [
+                            { name: 'Photos', value: 'photo' },
+                            { name: 'Videos', value: 'video' },
+                            { name: 'Back to previous', value: '__back__' },
+                        ],
+                        validate: (value) => {
+                            const selectedValues = value as unknown as string[];
+                            if (selectedValues?.includes('__back__')) {
+                                return true;
+                            }
+                            if (!selectedValues || selectedValues.length === 0) {
+                                return 'Select at least one content type';
+                            }
                             return true;
-                        }
-                        if (!selectedValues || selectedValues.length === 0) {
-                            return 'Select at least one content type';
-                        }
-                        return true;
-                    },
-                });
+                        },
+                    });
+                }
 
                 if (selectedContentTypes.includes('__back__')) {
                     break;
                 }
 
-                const shouldDownloadPhotos = selectedContentTypes.includes('photo');
-                const shouldDownloadVideos = selectedContentTypes.includes('video');
+                const shouldDownloadPhotos = selectedContentTypes.includes('photo') || selectedContentTypes.includes('all');
+                const shouldDownloadVideos = selectedContentTypes.includes('video') || selectedContentTypes.includes('all');
                 const postFilter = createPostFilter(config);
                 const dateBoundary = createDateBoundary(config);
                 let terminatedByDateBoundary = false;
