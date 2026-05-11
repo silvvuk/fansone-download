@@ -48,11 +48,10 @@ export class Video {
                     domain: this.post.domain,
                 });
             default:
-                // video5, video7, and other Bunny CDN domains serve the master playlist directly
-                // at https://{domain}/{videoId}/master.m3u8. The /bunny/signed-url endpoint only
-                // accepts the video9194 domain. Note: the domain must NOT be duplicated in the
-                // path — that returns 403 Forbidden.
-                return `https://${this.post.domain}/${this.post.video}/master.m3u8`;
+                // video5, video7, and other Bunny CDN domains serve the playlist at
+                // https://{domain}/{domain}/{videoId}/video_1.m3u8
+                // The /bunny/signed-url endpoint only accepts the video9194 domain.
+                return `https://${this.post.domain}/${this.post.domain}/${this.post.video}/video_1.m3u8`;
         }
 
 
