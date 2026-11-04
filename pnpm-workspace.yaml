@@ -1,0 +1,5 @@
+allowBuilds:
+  '@seydx/node-av-win32-x64-mingw': false
+  '@seydx/node-av-win32-x64-msvc': true
+  esbuild: true
+  node-av: true

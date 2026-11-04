@@ -2,7 +2,7 @@ import { checkbox, input, select } from '@inquirer/prompts';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { readConfig, writeConfig, type Config } from './config.js';
-import { DOWNLOADS_DIR, setConfig } from './consts.js';
+import { DOWNLOADS_DIR, getTempDir, setConfig } from './consts.js';
 import { FansoneApi } from './fansone.js';
 import { Video } from './video.js';
 import type { Post } from './fansone.d.js';
@@ -198,12 +198,21 @@ export async function runCli(): Promise<void> {
             choices: [
                 { name: 'Download subscription resources', value: 'download' },
                 { name: 'Settings', value: 'settings' },
+                { name: 'Clear temp folder', value: 'clearTemp' },
                 { name: 'Exit', value: 'exit' },
             ],
         });
 
         if (menu === 'exit') {
             break;
+        }
+
+        if (menu === 'clearTemp') {
+            const tempDir = getTempDir();
+            await fs.rm(tempDir, { recursive: true, force: true });
+            await fs.mkdir(tempDir, { recursive: true });
+            console.log(`Cleared temp folder: ${tempDir}`);
+            continue;
         }
 
         if (menu === 'settings') {

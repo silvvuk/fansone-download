@@ -11,7 +11,10 @@ ffmpeg with pre-built binaries).
 Then
 
 ```sh
+// admin
 corepack enable pnpm
+
+// normal
 pnpm i
 pnpm start
 ```

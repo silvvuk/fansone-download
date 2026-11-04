@@ -110,13 +110,40 @@ export class Video {
             const lines = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
             const segments: string[] = [];
             let nestedPlaylistUrl: string | undefined;
+            let initUrl: string | undefined;
+            let audioPlaylistUrl: string | undefined;
+            let audioIsDefault = false;
+            let bestBandwidth = -1;
 
             for (let i = 0; i < lines.length; i += 1) {
                 const line = lines[i];
+                if (line.startsWith('#EXT-X-MAP')) {
+                    const uri = /URI="([^"]+)"/.exec(line)?.[1];
+                    if (uri) {
+                        initUrl = resolveUrl(baseUrl, uri);
+                    }
+                    continue;
+                }
+                // Separate audio rendition: the video variant carries no audio track itself
+                if (line.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/i.test(line)) {
+                    const uri = /URI="([^"]+)"/.exec(line)?.[1];
+                    if (uri) {
+                        const isDefault = /DEFAULT=YES/i.test(line);
+                        if (!audioPlaylistUrl || (isDefault && !audioIsDefault)) {
+                            audioPlaylistUrl = resolveUrl(baseUrl, uri);
+                            audioIsDefault = isDefault;
+                        }
+                    }
+                    continue;
+                }
                 if (line.startsWith('#EXT-X-STREAM-INF')) {
                     const nextLine = lines[i + 1];
                     if (nextLine && !nextLine.startsWith('#')) {
-                        nestedPlaylistUrl = resolveUrl(baseUrl, nextLine);
+                        const bandwidth = Number(/(?:^|[:,])BANDWIDTH=(\d+)/i.exec(line)?.[1] ?? 0);
+                        if (bandwidth > bestBandwidth) {
+                            bestBandwidth = bandwidth;
+                            nestedPlaylistUrl = resolveUrl(baseUrl, nextLine);
+                        }
                         i += 1;
                     }
                     continue;
@@ -131,19 +158,54 @@ export class Video {
                 segments.push(resolveUrl(baseUrl, line));
             }
 
-            return { segments, nestedPlaylistUrl };
+            return { segments, nestedPlaylistUrl, initUrl, audioPlaylistUrl };
         };
 
         let m3u8Text = await fetchTextWithRetry(m3u8Url);
-        let { segments, nestedPlaylistUrl } = parseM3u8(m3u8Text, m3u8Url);
+        let { segments, nestedPlaylistUrl, initUrl, audioPlaylistUrl } = parseM3u8(m3u8Text, m3u8Url);
 
         if (segments.length === 0 && nestedPlaylistUrl) {
             logger.debug(`[Video:${this.post.id}] Using sub-playlist: ${nestedPlaylistUrl}`);
             m3u8Text = await fetchTextWithRetry(nestedPlaylistUrl);
-            segments = parseM3u8(m3u8Text, nestedPlaylistUrl).segments;
+            ({ segments, initUrl } = parseM3u8(m3u8Text, nestedPlaylistUrl));
         }
 
-        logger.info(`[Video:${this.post.id}] Number of segments: ${segments.length}`);
+        // fMP4 (CMAF) playlists need the EXT-X-MAP init segment; without it ffmpeg can't read the moov info
+        const fetchInit = async (url: string | undefined, targetPath: string) => {
+            if (!url) {
+                return;
+            }
+            const hasInit = await fs.stat(targetPath).then(stat => stat.size > 0).catch(() => false);
+            if (!hasInit) {
+                const initData = await got.get(url, {
+                    headers: requestHeaders,
+                    responseType: 'buffer',
+                    retry: { limit: maxRetries },
+                }).buffer();
+                await fs.writeFile(targetPath, initData);
+            }
+        };
+        await fetchInit(initUrl, path.resolve(tsRangeTempDir, 'init.mp4'));
+
+        // Separate audio rendition is downloaded into its own subdirectory and muxed with the video
+        const audioDir = path.resolve(tsRangeTempDir, 'audio');
+        let audioInitUrl: string | undefined;
+        let audioSegments: string[] = [];
+        if (audioPlaylistUrl) {
+            logger.info(`[Video:${this.post.id}] Using audio playlist: ${audioPlaylistUrl}`);
+            await dirExistsOrMkdir(audioDir);
+            const audioText = await fetchTextWithRetry(audioPlaylistUrl);
+            ({ segments: audioSegments, initUrl: audioInitUrl } = parseM3u8(audioText, audioPlaylistUrl));
+            await fetchInit(audioInitUrl, path.resolve(audioDir, 'init.mp4'));
+        }
+
+        const videoSegmentCount = segments.length;
+        segments = [...segments, ...audioSegments];
+        const segmentLocation = (index: number) => index < videoSegmentCount
+            ? { dir: tsRangeTempDir, local: index, fmp4: Boolean(initUrl) }
+            : { dir: audioDir, local: index - videoSegmentCount, fmp4: Boolean(audioInitUrl) };
+
+        logger.info(`[Video:${this.post.id}] Number of segments: ${videoSegmentCount} video + ${audioSegments.length} audio`);
 
         const data = await readData();
         const videoKey = String(this.post.id);
@@ -151,14 +213,71 @@ export class Video {
         const existingProgress = data.videos[videoKey];
         const completedSet = new Set<number>(existingProgress?.completedSegments ?? []);
 
-        const existingFiles = await fs.readdir(tsRangeTempDir).catch(() => []);
-        const existingSet = new Set<number>();
-        for (const file of existingFiles) {
-            if (!file.toLowerCase().endsWith('.ts')) {
-                continue;
+        // Truncated segments from interrupted runs cause "partial file"/corrupt packet errors when muxing
+        const isSegmentComplete = async (filePath: string, fmp4: boolean): Promise<boolean> => {
+            const handle = await fs.open(filePath, 'r').catch(() => null);
+            if (!handle) {
+                return false;
             }
-            const index = Number.parseInt(file.replace('.ts', ''), 10);
-            if (Number.isInteger(index)) {
+            try {
+                const { size } = await handle.stat();
+                if (size === 0) {
+                    return false;
+                }
+                if (!fmp4) {
+                    return size % 188 === 0;
+                }
+                // fMP4: top-level box sizes must add up exactly to the file size
+                const header = Buffer.alloc(16);
+                let offset = 0;
+                while (offset < size) {
+                    if (size - offset < 8) {
+                        return false;
+                    }
+                    await handle.read(header, 0, 16, offset);
+                    let boxSize = header.readUInt32BE(0);
+                    if (boxSize === 1) {
+                        boxSize = Number(header.readBigUInt64BE(8));
+                    } else if (boxSize === 0) {
+                        boxSize = size - offset;
+                    }
+                    if (boxSize < 8) {
+                        return false;
+                    }
+                    offset += boxSize;
+                }
+                return offset === size;
+            } finally {
+                await handle.close();
+            }
+        };
+
+        const existingSet = new Set<number>();
+        for (const [dir, offset, fmp4] of [
+            [tsRangeTempDir, 0, Boolean(initUrl)],
+            [audioDir, videoSegmentCount, Boolean(audioInitUrl)],
+        ] as const) {
+            const existingFiles = await fs.readdir(dir).catch(() => []);
+            for (const file of existingFiles) {
+                if (file.toLowerCase().endsWith('.part')) {
+                    await fs.rm(path.resolve(dir, file), { force: true });
+                    continue;
+                }
+                if (!file.toLowerCase().endsWith('.ts')) {
+                    continue;
+                }
+                const localIndex = Number.parseInt(file.replace('.ts', ''), 10);
+                if (!Number.isInteger(localIndex)) {
+                    continue;
+                }
+                const index = localIndex + offset;
+                const segPath = path.resolve(dir, file);
+                if (!(await isSegmentComplete(segPath, fmp4))) {
+                    logger.warn(`[Video:${this.post.id}] Removing incomplete segment: ${file}`);
+                    await fs.rm(segPath, { force: true });
+                    completedSet.delete(index);
+                    continue;
+                }
                 existingSet.add(index);
                 completedSet.add(index);
             }
@@ -234,7 +353,14 @@ export class Video {
                         stream.on('data', (chunk: Buffer) => {
                             segmentBytes += chunk.length;
                         });
-                        await pipeline(stream, createWriteStream(filePath));
+                        const partPath = `${filePath}.part`;
+                        try {
+                            await pipeline(stream, createWriteStream(partPath));
+                            await fs.rename(partPath, filePath);
+                        } catch (error) {
+                            await fs.rm(partPath, { force: true });
+                            throw error;
+                        }
                         return segmentBytes;
                     } catch (error) {
                         if (attempt >= maxRetries) {
@@ -249,8 +375,9 @@ export class Video {
             };
 
             const tasks = segments.map((segmentUrl, index) => queue.add(async () => {
-                const fileName = `${String(index).padStart(6, '0')}.ts`;
-                const filePath = path.resolve(tsRangeTempDir, fileName);
+                const { dir, local } = segmentLocation(index);
+                const segFileName = `${String(local).padStart(6, '0')}.ts`;
+                const filePath = path.resolve(dir, segFileName);
                 const exists = await fs.stat(filePath).then(stat => stat.size > 0).catch(() => false);
                 if (exists) {
                     if (!completedSet.has(index)) {
@@ -273,7 +400,7 @@ export class Video {
             progressBar.stop();
             logger.info(`[Video:${this.post.id}] Download completed, skipped: ${skipped}, success: ${completed}`);
         }
-        await this.remuxWithNodeAv(tsRangeTempDir, outputDir, fileName);
+        await this.remuxWithNodeAv(tsRangeTempDir, audioPlaylistUrl ? audioDir : null, outputDir, fileName);
 
         // Remove the completed entry to keep data.json small.
         // Completed downloads are detected by the existence of the output file on disk
@@ -286,7 +413,7 @@ export class Video {
         logger.debug(`[Video:${this.post.id}] Deleted temporary directory: ${tsRangeTempDir}`);
     }
 
-    private async remuxWithNodeAv(tsDir: string, outputDir: string, fileName: string): Promise<string | null> {
+    private async remuxWithNodeAv(tsDir: string, audioDir: string | null, outputDir: string, fileName: string): Promise<string | null> {
         const tsFiles = (await fs.readdir(tsDir))
             .filter(file => file.toLowerCase().endsWith('.ts'))
             .sort();
@@ -295,15 +422,43 @@ export class Video {
             logger.warn(`[Video:${this.post.id}] No ts segments found, skipping muxing`);
             return null;
         }
-        const probePath = path.resolve(tsDir, tsFiles[0]);
-        const probe = await Demuxer.open(probePath);
+        const openSegment = async (dir: string, initData: Buffer | null, file: string, tmpName = 'combined.tmp.mp4') => {
+            const segPath = path.resolve(dir, file);
+            if (!initData) {
+                return Demuxer.open(segPath);
+            }
+            const combinedPath = path.resolve(dir, tmpName);
+            await fs.writeFile(combinedPath, Buffer.concat([initData, await fs.readFile(segPath)]));
+            return Demuxer.open(combinedPath);
+        };
+        const initData = await fs.readFile(path.resolve(tsDir, 'init.mp4')).catch(() => null);
+        const probe = await openSegment(tsDir, initData, tsFiles[0], 'probe.tmp.mp4');
+
+        let audioFiles: string[] = [];
+        let audioInitData: Buffer | null = null;
+        let audioProbe: Awaited<ReturnType<typeof Demuxer.open>> | null = null;
+        if (audioDir) {
+            audioFiles = (await fs.readdir(audioDir).catch(() => []))
+                .filter(file => file.toLowerCase().endsWith('.ts'))
+                .sort();
+            if (audioFiles.length > 0) {
+                audioInitData = await fs.readFile(path.resolve(audioDir, 'init.mp4')).catch(() => null);
+                audioProbe = await openSegment(audioDir, audioInitData, audioFiles[0], 'probe.tmp.mp4');
+            }
+        }
 
         let outputPath: string | null = null;
 
         try {
             const streams = probe.streams ?? [];
             const videoStream = typeof probe.video === 'function' ? probe.video() : null;
-            const audioStream = typeof probe.audio === 'function' ? probe.audio() : null;
+            const videoAudioStream = typeof probe.audio === 'function' ? probe.audio() : null;
+            const separateAudioStream = audioProbe && typeof audioProbe.audio === 'function' ? audioProbe.audio() : null;
+            const audioStream = separateAudioStream ?? videoAudioStream;
+
+            if (!audioStream) {
+                logger.warn(`[Video:${this.post.id}] No audio stream found; output will be silent`);
+            }
 
             const getCodecId = (stream: any) =>
                 stream?.codecpar?.codecId
@@ -331,7 +486,7 @@ export class Video {
             const outputExt = outputFormat === 'mp4' ? 'mp4' : 'mkv';
 
             await dirExistsOrMkdir(outputDir);
-            const outputPath = path.resolve(outputDir, `${fileName}.${outputExt}`);
+            outputPath = path.resolve(outputDir, `${fileName}.${outputExt}`);
 
             logger.info(`[Video:${this.post.id}] Inferred format: video=${videoCodecName}(${videoCodecId ?? 'none'}), audio=${audioCodecName}(${audioCodecId ?? 'none'})`);
             logger.info(`[Video:${this.post.id}] Muxing output: ${outputPath}`);
@@ -360,10 +515,11 @@ export class Video {
                     const outIndex = muxer.addStream(videoStream);
                     streamIndexMap.set(videoStream.index, outIndex);
                 }
+                const audioIndexMap = new Map<number, number>();
                 if (audioStream) {
                     resetCodecTagForMp4(audioStream);
                     const outIndex = muxer.addStream(audioStream);
-                    streamIndexMap.set(audioStream.index, outIndex);
+                    (separateAudioStream ? audioIndexMap : streamIndexMap).set(audioStream.index, outIndex);
                 }
                 for (const stream of streams) {
                     if (!streamIndexMap.has(stream.index) && stream?.codecpar?.codecType !== AVMEDIA_TYPE_VIDEO && stream?.codecpar?.codecType !== AVMEDIA_TYPE_AUDIO) {
@@ -373,15 +529,13 @@ export class Video {
                     }
                 }
 
-                for (const tsFile of tsFiles) {
-                    const segPath = path.resolve(tsDir, tsFile);
-                    const seg = await Demuxer.open(segPath);
+                const writeSegment = async (seg: Awaited<ReturnType<typeof Demuxer.open>>, indexMap: Map<number, number>) => {
                     try {
                         for await (const packet of seg.packets()) {
                             if (!packet) {
                                 continue;
                             }
-                            const targetIndex = streamIndexMap.get(packet.streamIndex);
+                            const targetIndex = indexMap.get(packet.streamIndex);
                             if (targetIndex !== undefined) {
                                 await muxer.writePacket(packet, targetIndex);
                             }
@@ -392,12 +546,24 @@ export class Video {
                     } finally {
                         await seg.close();
                     }
+                };
+
+                // Interleave video and audio segment by segment so players can stream the result
+                const segmentCount = Math.max(tsFiles.length, audioFiles.length);
+                for (let i = 0; i < segmentCount; i += 1) {
+                    if (i < tsFiles.length) {
+                        await writeSegment(await openSegment(tsDir, initData, tsFiles[i]), streamIndexMap);
+                    }
+                    if (audioDir && i < audioFiles.length && separateAudioStream) {
+                        await writeSegment(await openSegment(audioDir, audioInitData, audioFiles[i], 'audio-combined.tmp.mp4'), audioIndexMap);
+                    }
                 }
             } finally {
                 await muxer.close();
             }
         } finally {
             await probe.close();
+            await audioProbe?.close();
         }
 
         logger.info(`[Video:${this.post.id}] Muxing completed`);
